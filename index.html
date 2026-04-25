@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>音声翻訳アプリ</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #F5F7FA;
+      min-height: 100vh;
+      padding: 40px 16px 24px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 22px;
+      margin-bottom: 28px;
+      color: #1a1a1a;
+    }
+    .btn-wrap { display: flex; justify-content: center; margin-bottom: 16px; }
+    #recBtn {
+      background: #4A90E2;
+      color: #fff;
+      border: none;
+      border-radius: 40px;
+      padding: 18px 48px;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #recBtn.recording { background: #E24A4A; }
+    #recBtn:disabled { background: #aaa; cursor: not-allowed; }
+    #status {
+      text-align: center;
+      min-height: 24px;
+      font-size: 14px;
+      color: #4A90E2;
+      margin-bottom: 20px;
+    }
+    #status.recording { color: #E24A4A; }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .lang { font-size: 13px; color: #888; margin-bottom: 8px; }
+    .label { font-size: 12px; color: #4A90E2; font-weight: bold; margin-top: 8px; }
+    .body { font-size: 15px; color: #333; margin-top: 4px; line-height: 1.6; }
+    .translation { color: #1a7a1a; }
+    #results { margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>音声翻訳アプリ</h1>
+  <div class="btn-wrap">
+    <button id="recBtn">🎙 録音開始</button>
+  </div>
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <script>
+    const GEMINI_API_KEY = 'AIzaSyBwg4EyPTinu2T3w4BLPwS3jNFJQ1Zguto';
+    const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+    const btn = document.getElementById('recBtn');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+
+    let mediaRecorder = null;
+    let chunks = [];
+    let isRecording = false;
+
+    btn.addEventListener('click', () => {
+      if (!isRecording) startRecording();
+      else stopRecording();
+    });
+
+    async function startRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        // iOSで使えるMIMEタイプを選択
+        const mimeType = MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : '';
+
+        mediaRecorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+
+        chunks = [];
+        mediaRecorder.ondataavailable = e => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+        mediaRecorder.start();
+        isRecording = true;
+        btn.textContent = '⏹ 停止';
+        btn.classList.add('recording');
+        status.textContent = '録音中...';
+        status.className = 'recording';
+      } catch (e) {
+        status.textContent = 'マイクのアクセスを許可してください';
+        status.className = '';
+      }
+    }
+
+    async function stopRecording() {
+      if (!mediaRecorder) return;
+      isRecording = false;
+      btn.disabled = true;
+      btn.textContent = '🎙 録音開始';
+      btn.classList.remove('recording');
+      status.textContent = '文字起こし・翻訳中...';
+      status.className = '';
+
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(t => t.stop());
+
+      mediaRecorder.onstop = async () => {
+        try {
+          if (chunks.length === 0) throw new Error('音声データが空です。もう少し長く録音してください');
+          const mimeType = mediaRecorder.mimeType || 'audio/mp4';
+          const blob = new Blob(chunks, { type: mimeType });
+          const base64 = await blobToBase64(blob);
+          await transcribeAndTranslate(base64, mimeType);
+          status.textContent = '';
+        } catch (e) {
+          status.textContent = 'エラー: ' + e.message;
+          status.style.color = '#E24A4A';
+        } finally {
+          btn.disabled = false;
+        }
+      };
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function transcribeAndTranslate(base64, mimeType) {
+      const res = await fetch(GEMINI_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: mimeType, data: base64 } },
+              { text: `この音声を文字起こしてください。
+文字起こした言語が日本語以外の場合は日本語に翻訳してください。
+
+以下のJSON形式のみで返してください（マークダウン不要）：
+{"language":"検出した言語名（日本語で）","transcription":"文字起こしテキスト","translation":"日本語訳（元が日本語の場合はnull）"}` }
+            ]
+          }]
+        })
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`APIエラー: ${res.status} - ${errText.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('レスポンスのパース失敗');
+      const parsed = JSON.parse(match[0]);
+      addCard(parsed);
+    }
+
+    function addCard({ language, transcription, translation }) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="lang">🌐 ${language}</div>
+        <div class="label">【文字起こし】</div>
+        <div class="body">${transcription}</div>
+        ${translation ? `
+          <div class="label">【日本語訳】</div>
+          <div class="body translation">${translation}</div>
+        ` : ''}
+      `;
+      results.prepend(card);
+    }
+  </script>
+</body>
+</html>
